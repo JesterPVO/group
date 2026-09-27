@@ -10,7 +10,7 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = "8814653206:AAHUY9SBLo9rvfG1-p8bjaO_lJ-8c0Ges7Y"
+TOKEN = os.environ.get("BOT_TOKEN", "8814653206:AAHUY9SBLo9rvfG1-p8bjaO_lJ-8c0Ges7Y")
 
 if not TOKEN:
     raise ValueError(
@@ -26,13 +26,15 @@ logging.basicConfig(
 def init_db():
     conn = sqlite3.connect("chat_bot.db")
     cursor = conn.cursor()
-    # Table for users
+    # Table for users with added is_admin and is_banned flags
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             display_name TEXT NOT NULL,
             message_count INTEGER DEFAULT 0,
-            is_active INTEGER DEFAULT 1
+            is_active INTEGER DEFAULT 1,
+            is_admin INTEGER DEFAULT 0,
+            is_banned INTEGER DEFAULT 0
         )
     """)
     # Table for storing media files sent to the bot
@@ -41,6 +43,7 @@ def init_db():
             media_id INTEGER PRIMARY KEY AUTOINCREMENT,
             sender_id INTEGER,
             sender_name TEXT,
+            media_type TEXT NOT NULL,
             file_id TEXT NOT NULL,
             caption TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -67,6 +70,13 @@ init_db()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    # Check if user is banned
+    user_record = db_execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    if user_record and user_record[0] == 1:
+        await update.message.reply_text("⛔ You are banned from using this bot.")
+        return
+
     default_name = f"User_{str(user_id)[-4:]}"
     db_execute(
         "INSERT INTO users (user_id, display_name) VALUES (?, ?) "
@@ -87,7 +97,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"To view chat statistics, use: `/leaderboard`\n"
         f"To sync/download all shared media, use: `/syncmedia`\n"
         f"To see all commands, use: `/help`\n\n"
-        f"Just send any message or photo here, and it will be broadcasted to everyone."
+        f"Just send any message, photo, or video here, and it will be broadcasted to everyone."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
@@ -99,9 +109,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 `/start` - Start the bot, register your profile, and see your current display name.\n"
         "🔹 `/setmyname <NewName>` - Change your anonymous display name (up to 30 characters).\n"
         "🔹 `/leaderboard` - View the top chatters and their message counts.\n"
-        "🔹 `/syncmedia` - Retrieve and download all media files shared in the chat.\n"
+        "🔹 `/syncmedia` - Retrieve and download all photos and videos shared in the chat.\n"
         "🔹 `/help` - Show this help menu with all command descriptions.\n\n"
-        "💬 *Broadcasting:* Just send any text or photo normally, and it will be broadcasted anonymously to all active chat members!"
+        "💬 *Broadcasting:* Just send any text, photo, or video normally, and it will be broadcasted anonymously to all active chat members!"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -127,9 +137,9 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top_users = db_execute(
-        "SELECT display_name, message_count FROM users "
+        "SELECT display_name, message_count FROM users WHERE is_banned = 0 "
         "ORDER BY message_count DESC LIMIT 10",
-        fetchall=True,
+        fetchone=False, fetchall=True,
     )
     if not top_users or top_users[0][1] == 0:
         await update.message.reply_text(
@@ -146,8 +156,8 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sync_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends back all media files saved in the bot's database to the requesting user."""
     media_records = db_execute(
-        "SELECT sender_name, file_id, caption, timestamp FROM media_store ORDER BY timestamp ASC",
-        fetchall=True,
+        "SELECT sender_name, media_type, file_id, caption, timestamp FROM media_store ORDER BY timestamp ASC",
+        fetchone=False, fetchall=True,
     )
     if not media_records:
         await update.message.reply_text("No media has been shared in this chat yet.")
@@ -155,26 +165,183 @@ async def sync_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"📦 Syncing {len(media_records)} media item(s)...")
     
-    for sender_name, file_id, caption, timestamp in media_records:
+    for sender_name, media_type, file_id, caption, timestamp in media_records:
         formatted_caption = f"From *{sender_name}* ({timestamp}):\n{caption}" if caption else f"From *{sender_name}* ({timestamp})"
         try:
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=file_id,
-                caption=formatted_caption,
-                parse_mode="Markdown",
-            )
+            if media_type == "photo":
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=file_id,
+                    caption=formatted_caption,
+                    parse_mode="Markdown",
+                )
+            elif media_type == "video":
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=file_id,
+                    caption=formatted_caption,
+                    parse_mode="Markdown",
+                )
         except Exception:
             await update.message.reply_text(f"⚠️ Could not load media from *{sender_name}* (expired or deleted).")
 
+# --- ADMIN PANEL & CONTROLS ---
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # Check if passcode was provided
+    if context.args and context.args[0] == "ahadop123":
+        db_execute("UPDATE users SET is_admin = 1 WHERE user_id = ?", (user_id,), commit=True)
+        await update.message.reply_text("🎉 Admin authentication successful!")
+
+    # Verify if user is an admin
+    admin_data = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
+    if not admin_data:
+        await update.message.reply_text("⛔ Unauthorized. Use `/admin ahadop123` to log in.", parse_mode="Markdown")
+        return
+
+    total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
+    active_users = db_execute("SELECT COUNT(*) FROM users WHERE is_active = 1 AND is_banned = 0", fetchone=True)[0]
+    banned_users = db_execute("SELECT COUNT(*) FROM users WHERE is_banned = 1", fetchone=True)[0]
+    total_msgs = db_execute("SELECT SUM(message_count) FROM users", fetchone=True)[0] or 0
+    total_media = db_execute("SELECT COUNT(*) FROM media_store", fetchone=True)[0]
+
+    admin_text = (
+        f"🛠 *Admin Control Panel* 🛠\n\n"
+        f"👥 Total Registered Users: `{total_users}`\n"
+        f"🟢 Active Users: `{active_users}`\n"
+        f"🚫 Banned Users: `{banned_users}`\n"
+        f"💬 Total Messages Sent: `{total_msgs}`\n"
+        f"📦 Total Media Stored: `{total_media}`\n\n"
+        f"*Admin Commands:*\n"
+        f"🔹 `/abroadcast <text>` - Send an official announcement\n"
+        f"🔹 `/ban <user_id>` - Ban a user\n"
+        f"🔹 `/unban <user_id>` - Unban a user\n"
+        f"🔹 `/kick <user_id>` - Kick/remove a user"
+    )
+    await update.message.reply_text(admin_text, parse_mode="Markdown")
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
+    if not is_admin:
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: `/abroadcast Your announcement text here`", parse_mode="Markdown")
+        return
+
+    announcement = "📢 *Admin Announcement*:\n\n" + " ".join(context.args)
+    all_users = db_execute("SELECT user_id FROM users WHERE is_banned = 0", fetchall=True)
+    
+    sent_count = 0
+    blocked_count = 0
+
+    for (recipient_id,) in all_users:
+        try:
+            await context.bot.send_message(
+                chat_id=recipient_id,
+                text=announcement,
+                parse_mode="Markdown"
+            )
+            sent_count += 1
+        except Exception:
+            blocked_count += 1
+            db_execute("UPDATE users SET is_active = 0 WHERE user_id = ?", (recipient_id,), commit=True)
+
+    await update.message.reply_text(
+        f"✅ Broadcast complete!\n"
+        f"📤 Successfully sent: `{sent_count}`\n"
+        f"❌ Failed (Blocked/Inactive): `{blocked_count}`",
+        parse_mode="Markdown"
+    )
+
+async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
+    if not is_admin:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: `/ban <user_id>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+        return
+
+    db_execute("UPDATE users SET is_banned = 1, is_active = 0 WHERE user_id = ?", (target_id,), commit=True)
+    try:
+        await context.bot.send_message(chat_id=target_id, text="❌ You have been banned from using this bot by an admin.")
+    except Exception:
+        pass
+    await update.message.reply_text(f"✅ User `{target_id}` has been banned successfully.", parse_mode="Markdown")
+
+async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
+    if not is_admin:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: `/unban <user_id>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+        return
+
+    db_execute("UPDATE users SET is_banned = 0, is_active = 1 WHERE user_id = ?", (target_id,), commit=True)
+    try:
+        await context.bot.send_message(chat_id=target_id, text="✅ Your ban has been lifted by an admin.")
+    except Exception:
+        pass
+    await update.message.reply_text(f"✅ User `{target_id}` has been unbanned.", parse_mode="Markdown")
+
+async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
+    if not is_admin:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: `/kick <user_id>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+        return
+
+    db_execute("DELETE FROM users WHERE user_id = ?", (target_id,), commit=True)
+    try:
+        await context.bot.send_message(chat_id=target_id, text="👢 You have been kicked and removed from the bot.")
+    except Exception:
+        pass
+    await update.message.reply_text(f"✅ User `{target_id}` has been kicked and deleted from database.", parse_mode="Markdown")
+
+# --- BROADCASTING MESSAGES/MEDIA ---
+
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
-    sender_data = db_execute(
-        "SELECT display_name FROM users WHERE user_id = ?",
-        (sender_id,),
-        fetchone=True,
-    )
-    if not sender_data:
+    
+    # Check if sender is banned
+    user_record = db_execute("SELECT display_name, is_banned FROM users WHERE user_id = ?", (sender_id,), fetchone=True)
+    if user_record and user_record[1] == 1:
+        await update.message.reply_text("⛔ You are banned from using this bot.")
+        return
+
+    if not user_record:
         sender_name = f"User_{str(sender_id)[-4:]}"
         db_execute(
             "INSERT INTO users (user_id, display_name, message_count, is_active) "
@@ -183,15 +350,16 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             commit=True,
         )
     else:
-        sender_name = sender_data[0]
+        sender_name = user_record[0]
         db_execute(
             "UPDATE users SET message_count = message_count + 1, is_active = 1 "
             "WHERE user_id = ?",
             (sender_id,),
             commit=True,
         )
+    
     active_users = db_execute(
-        "SELECT user_id FROM users WHERE is_active = 1", fetchall=True
+        "SELECT user_id FROM users WHERE is_active = 1 AND is_banned = 0", fetchall=True
     )
     
     if update.message.text:
@@ -211,13 +379,19 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         commit=True,
                     )
                     
-    elif update.message.photo:
-        photo_id = update.message.photo[-1].file_id
+    elif update.message.photo or update.message.video:
+        if update.message.photo:
+            media_type = "photo"
+            file_id = update.message.photo[-1].file_id
+        else:
+            media_type = "video"
+            file_id = update.message.video.file_id
+
         caption_text = update.message.caption if update.message.caption else ""
         
         db_execute(
-            "INSERT INTO media_store (sender_id, sender_name, file_id, caption) VALUES (?, ?, ?, ?)",
-            (sender_id, sender_name, photo_id, caption_text),
+            "INSERT INTO media_store (sender_id, sender_name, media_type, file_id, caption) VALUES (?, ?, ?, ?, ?)",
+            (sender_id, sender_name, media_type, file_id, caption_text),
             commit=True,
         )
         
@@ -229,12 +403,20 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for (recipient_id,) in active_users:
             if recipient_id != sender_id:
                 try:
-                    await context.bot.send_photo(
-                        chat_id=recipient_id,
-                        photo=photo_id,
-                        caption=caption,
-                        parse_mode="Markdown",
-                    )
+                    if media_type == "photo":
+                        await context.bot.send_photo(
+                            chat_id=recipient_id,
+                            photo=file_id,
+                            caption=caption,
+                            parse_mode="Markdown",
+                        )
+                    elif media_type == "video":
+                        await context.bot.send_video(
+                            chat_id=recipient_id,
+                            video=file_id,
+                            caption=caption,
+                            parse_mode="Markdown",
+                        )
                 except Exception:
                     db_execute(
                         "UPDATE users SET is_active = 0 WHERE user_id = ?",
@@ -245,13 +427,21 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))  # Added help command handler
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("setmyname", set_name))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
     app.add_handler(CommandHandler("syncmedia", sync_media))
+    
+    # Admin Handlers
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("abroadcast", admin_broadcast))
+    app.add_handler(CommandHandler("ban", ban_user))
+    app.add_handler(CommandHandler("unban", unban_user))
+    app.add_handler(CommandHandler("kick", kick_user))
+    
     app.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            (filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND & filters.ChatType.PRIVATE,
             broadcast_message,
         )
     )
