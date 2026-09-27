@@ -10,7 +10,7 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = os.getenv(" 8814653206:AAHUY9SBLo9rvfG1-p8bjaO_lJ-8c0Ges7Y")
+TOKEN = os.getenv("8814653206:AAHUY9SBLo9rvfG1-p8bjaO_lJ-8c0Ges7Y")
 
 if not TOKEN:
     raise ValueError(
