@@ -14,7 +14,7 @@ from telegram.ext import (
 TOKEN = os.getenv("8814653206:AAFIHeEObTdilvjQeyduyXvUJe0R0fvm__g")
 
 if not TOKEN:
-    raise ValueError("8814653206:AAFIHeEObTdilvjQeyduyXvUJe0R0fvm__g" environment variable is missing! Please set it before running.")
+    raise ValueError("BOT_TOKEN environment variable is missing! Please set it before running.")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
