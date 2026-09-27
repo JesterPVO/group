@@ -10,7 +10,8 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = os.getenv("8814653206:AAHUY9SBLo9rvfG1-p8bjaO_lJ-8c0Ges7Y")
+# Your hardcoded bot token
+TOKEN = "8814653206:AAHUY9SBLo9rvfG1-p8bjaO_lJ-8c0Ges7Y"
 
 if not TOKEN:
     raise ValueError(
@@ -196,3 +197,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
