@@ -94,6 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Welcome to the Anonymous Group Chat!\n\n"
         f"Your current display name is: *{current_name}*\n"
         f"To change it, use: `/setmyname YourName`\n"
+        f"To view your stats, use: `/info`\n"
         f"To view chat statistics, use: `/leaderboard`\n"
         f"To sync/download all shared media, use: `/syncmedia`\n"
         f"To see all commands, use: `/help`\n\n"
@@ -108,6 +109,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Here are the available commands you can use:\n\n"
         "🔹 `/start` - Start the bot, register your profile, and see your current display name.\n"
         "🔹 `/setmyname <NewName>` - Change your anonymous display name (up to 30 characters).\n"
+        "🔹 `/info` - View your profile stats (messages sent, media shared, account status).\n"
         "🔹 `/leaderboard` - View the top chatters and their message counts.\n"
         "🔹 `/syncmedia` - Retrieve and download all photos and videos shared in the chat.\n"
         "🔹 `/help` - Show this help menu with all command descriptions.\n\n"
@@ -134,6 +136,56 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Your name has been updated to: *{new_name}*", parse_mode="Markdown"
     )
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays statistics for the user or a target user (if admin)."""
+    user_id = update.effective_user.id
+    
+    user_record = db_execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    if user_record and user_record[0] == 1:
+        await update.message.reply_text("⛔ You are banned from using this bot.")
+        return
+
+    target_id = user_id
+    is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
+    
+    if context.args and is_admin:
+        try:
+            target_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Invalid user ID.")
+            return
+
+    user_data = db_execute(
+        "SELECT display_name, message_count, is_banned FROM users WHERE user_id = ?",
+        (target_id,),
+        fetchone=True
+    )
+    
+    if not user_data:
+        await update.message.reply_text(f"❌ No records found for user ID `{target_id}`.", parse_mode="Markdown")
+        return
+
+    display_name, message_count, is_banned = user_data
+
+    media_count = db_execute(
+        "SELECT COUNT(*) FROM media_store WHERE sender_id = ?",
+        (target_id,),
+        fetchone=True
+    )[0]
+
+    status = "🚫 Banned" if is_banned == 1 else "🟢 Active"
+
+    info_text = (
+        f"📊 *User Information Profile*\n\n"
+        f"🆔 User ID: `{target_id}`\n"
+        f"👤 Display Name: *{display_name}*\n"
+        f"💬 Messages Sent: `{message_count}`\n"
+        f"📦 Media Shared: `{media_count}`\n"
+        f"📌 Status: {status}"
+    )
+    
+    await update.message.reply_text(info_text, parse_mode="Markdown")
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top_users = db_execute(
@@ -190,12 +242,10 @@ async def sync_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # Check if passcode was provided
     if context.args and context.args[0] == "ahadop123":
         db_execute("UPDATE users SET is_admin = 1 WHERE user_id = ?", (user_id,), commit=True)
         await update.message.reply_text("🎉 Admin authentication successful!")
 
-    # Verify if user is an admin
     admin_data = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
     if not admin_data:
         await update.message.reply_text("⛔ Unauthorized. Use `/admin ahadop123` to log in.", parse_mode="Markdown")
@@ -335,7 +385,6 @@ async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
     
-    # Check if sender is banned
     user_record = db_execute("SELECT display_name, is_banned FROM users WHERE user_id = ?", (sender_id,), fetchone=True)
     if user_record and user_record[1] == 1:
         await update.message.reply_text("⛔ You are banned from using this bot.")
@@ -429,6 +478,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("setmyname", set_name))
+    app.add_handler(CommandHandler("info", info_command))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
     app.add_handler(CommandHandler("syncmedia", sync_media))
     
