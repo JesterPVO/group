@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import logging
+import time
+from collections import defaultdict
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,12 +12,13 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = os.environ.get("BOT_TOKEN", "8672576422:AAEantXOB7TURrS0FgtQ-Z_PFO1epwNe_Kw")
+# ⚠️ SECURITY WARNING: Never hardcode bot tokens directly in your scripts.
+TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-if not TOKEN:
+if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
     raise ValueError(
-        "BOT_TOKEN environment variable is missing! "
-        "Set it before running (do NOT hardcode it in the script)."
+        "BOT_TOKEN environment variable is missing or using default placeholder! "
+        "Set it in your environment before running."
     )
 
 logging.basicConfig(
@@ -23,10 +26,33 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+DB_PATH = "chat_bot.db"
+
+# --- SPAM SYSTEM SETTINGS ---
+# Stores timestamps of media messages per user: {user_id: [timestamp1, timestamp2, ...]}
+user_media_timestamps = defaultdict(list)
+SPAM_LIMIT = 20  # Max media count
+SPAM_WINDOW = 5.0  # Time window in seconds
+
+def is_spamming_media(user_id: int) -> bool:
+    """Checks if a user sent more than 20 media items in 5 seconds."""
+    current_time = time.time()
+    # Filter out timestamps older than 5 seconds
+    user_media_timestamps[user_id] = [
+        ts for ts in user_media_timestamps[user_id] if current_time - ts <= SPAM_WINDOW
+    ]
+    
+    # Check limit
+    if len(user_media_timestamps[user_id]) >= SPAM_LIMIT:
+        return True
+    
+    # Add current timestamp
+    user_media_timestamps[user_id].append(current_time)
+    return False
+
 def init_db():
-    conn = sqlite3.connect("chat_bot.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Table for users with added is_admin, is_banned, and infinite_sync flags
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -38,7 +64,6 @@ def init_db():
             infinite_sync INTEGER DEFAULT 0
         )
     """)
-    # Table for storing media files sent to the bot
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS media_store (
             media_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,14 +75,12 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Table for storing the admin-configured service message
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS service_config (
             key TEXT PRIMARY KEY,
             value TEXT
         )
     """)
-    # Insert default service message if none exists
     cursor.execute("""
         INSERT OR IGNORE INTO service_config (key, value) 
         VALUES ('service_msg', 'Welcome to the Anonymous Group Chat & Media Vault! Send any message, photo, or video to broadcast it.')
@@ -66,7 +89,7 @@ def init_db():
     conn.close()
 
 def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
-    conn = sqlite3.connect("chat_bot.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(query, params)
     result = None
@@ -83,8 +106,8 @@ init_db()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    context.user_data["waiting_for_storage"] = False
     
-    # Check if user clicked a deep-link (e.g., ?start=media_ID)
     if context.args and context.args[0].startswith("media_"):
         try:
             media_id = int(context.args[0].split("_")[1])
@@ -127,7 +150,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     current_name = user_data[0] if user_data else default_name
     
-    # Fetch admin service message
     service_record = db_execute("SELECT value FROM service_config WHERE key = 'service_msg'", fetchone=True)
     admin_service_text = service_record[0] if service_record else "Welcome!"
 
@@ -146,6 +168,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["waiting_for_storage"] = False
     service_record = db_execute("SELECT value FROM service_config WHERE key = 'service_msg'", fetchone=True)
     admin_service_text = service_record[0] if service_record else "No active notice."
 
@@ -154,10 +177,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 *Admin Service Notice:*\n{admin_service_text}\n\n"
         f"Here are the available commands you can use:\n"
         f"🔹 `/start` - Start the bot & see service notice\n"
-        f"🔹 `/setmyname <NewName>` - Change your anonymous display name (up to 30 characters)\n"
+        f"🔹 `/setmyname ` - Change your anonymous display name (up to 30 characters)\n"
         f"🔹 `/info` - View your profile stats (messages sent, media shared, status)\n"
         f"🔹 `/leaderboard` - View top chatters and their message counts\n"
-        f"🔹 `/syncmedia` - Sync media (Free users get 1 item 5s preview; contact @jasonpvo for infinite sync)\n"
+        f"🔹 `/syncmedia` - Sync media (Free users get 1 item 5s preview; contact admin for infinite sync)\n"
         f"🔹 `/mystorage` - Open private media vault to store files and generate shareable links\n"
         f"🔹 `/help` - Show this help menu\n\n"
         f"💬 *Broadcasting:* Just send text, photos, or videos normally to broadcast anonymously!"
@@ -253,7 +276,7 @@ async def sync_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         upgrade_msg = (
             f"🔒 *Want Infinite Sync Time & All Files?*\n\n"
-            f"You have reached your standard sync limit. To unlock **infinite sync time** and download all past files instantly, please contact @jasonpvo."
+            f"You have reached your standard sync limit. To unlock **infinite sync time** and download all past files instantly, please contact an admin."
         )
         await update.message.reply_text(upgrade_msg, parse_mode="Markdown")
         return
@@ -273,7 +296,7 @@ async def mystorage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage_help = (
         "📂 *Personal Media Storage Vault*\n\n"
         "Want to store media and turn it into a shareable link?\n\n"
-        "Send any photo or video right now with a caption/name, and the bot will instantly generate a custom shareable link for you!"
+        "Send any photo or video right now with an optional caption, and the bot will generate a custom shareable link for you!"
     )
     context.user_data["waiting_for_storage"] = True
     await update.message.reply_text(storage_help, parse_mode="Markdown")
@@ -281,7 +304,6 @@ async def mystorage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- ADMIN PANEL & SERVICE MESSAGE CONTROL ---
 
 async def admin_set_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to set/change the custom service message displayed to users."""
     user_id = update.effective_user.id
     is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
     if not is_admin:
@@ -304,7 +326,7 @@ async def grant_infinite_sync(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if not context.args:
-        await update.message.reply_text("Usage: `/infinitesync <user_id>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/infinitesync `", parse_mode="Markdown")
         return
 
     try:
@@ -315,7 +337,7 @@ async def grant_infinite_sync(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     db_execute("UPDATE users SET infinite_sync = 1 WHERE user_id = ?", (target_id,), commit=True)
     try:
-        await context.bot.send_message(chat_id=target_id, text="🎉 Your account has been upgraded with **Infinite Sync Time** by @jasonpvo's team/admin!", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=target_id, text="🎉 Your account has been upgraded with **Infinite Sync Time** by the admin team!", parse_mode="Markdown")
     except Exception:
         pass
     await update.message.reply_text(f"✅ User `{target_id}` has been granted Infinite Sync.", parse_mode="Markdown")
@@ -329,7 +351,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     admin_data = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
     if not admin_data:
-        await update.message.reply_text("⛔ Unauthorized. Use `/admin ahadop123` to log in.", parse_mode="Markdown")
+        await update.message.reply_text("⛔ Unauthorized. Use `/admin ` to log in.", parse_mode="Markdown")
         return
 
     total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
@@ -346,11 +368,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💬 Total Messages: `{total_msgs}` | 📦 Media Stored: `{total_media}`\n\n"
         f"📢 **Current Service Message:**\n_{current_service}_\n\n"
         f"*Admin Controls & Commands:*\n"
-        f"🔹 `/setservice <text>` - Update bot service message\n"
-        f"🔹 `/abroadcast <text>` - Send official announcement\n"
-        f"🔹 `/infinitesync <user_id>` - Grant infinite sync\n"
-        f"🔹 `/ban <user_id>` / `/unban <user_id>` - Manage bans\n"
-        f"🔹 `/kick <user_id>` - Kick/delete user"
+        f"🔹 `/setservice ` - Update bot service message\n"
+        f"🔹 `/abroadcast ` - Send official announcement\n"
+        f"🔹 `/infinitesync ` - Grant infinite sync\n"
+        f"🔹 `/ban ` / `/unban ` - Manage bans\n"
+        f"🔹 `/kick ` - Kick/delete user"
     )
     await update.message.reply_text(admin_text, parse_mode="Markdown")
 
@@ -385,7 +407,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
     if not is_admin or not context.args:
-        await update.message.reply_text("Usage: `/ban <user_id>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/ban `", parse_mode="Markdown")
         return
     try:
         target_id = int(context.args[0])
@@ -399,7 +421,7 @@ async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
     if not is_admin or not context.args:
-        await update.message.reply_text("Usage: `/unban <user_id>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/unban `", parse_mode="Markdown")
         return
     try:
         target_id = int(context.args[0])
@@ -413,7 +435,7 @@ async def kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_admin = db_execute("SELECT is_admin FROM users WHERE user_id = ? AND is_admin = 1", (user_id,), fetchone=True)
     if not is_admin or not context.args:
-        await update.message.reply_text("Usage: `/kick <user_id>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/kick `", parse_mode="Markdown")
         return
     try:
         target_id = int(context.args[0])
@@ -439,32 +461,47 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sender_name = user_record[0]
         db_execute("UPDATE users SET message_count = message_count + 1, is_active = 1 WHERE user_id = ?", (sender_id,), commit=True)
 
-    if context.user_data.get("waiting_for_storage") and (update.message.photo or update.message.video):
-        media_type = "photo" if update.message.photo else "video"
-        file_id = update.message.photo[-1].file_id if media_type == "photo" else update.message.video.file_id
-        file_name = update.message.caption if update.message.caption else f"Media_{sender_id}"
-        
-        cursor = sqlite3.connect("chat_bot.db").cursor()
-        cursor.execute("INSERT INTO media_store (sender_id, sender_name, media_type, file_id, caption) VALUES (?, ?, ?, ?, ?)",
-                       (sender_id, sender_name, media_type, file_id, file_name))
-        media_db_id = cursor.lastrowid
-        cursor.connection.commit()
-        cursor.connection.close()
+    # 🛑 SPAM PROTECTION CHECK FOR MEDIA 🛑
+    if update.message.photo or update.message.video:
+        if is_spamming_media(sender_id):
+            await update.message.reply_text("⚠️ *Anti-Spam Warning*: You cannot send more than 20 media items in 5 seconds! Please slow down.", parse_mode="Markdown")
+            return
 
-        bot_username = context.bot.username
-        shareable_link = f"https://t.me/{bot_username}?start=media_{media_db_id}"
+    # 📂 FIXED MYSTORAGE VAULT UPLOAD HANDLER
+    if context.user_data.get("waiting_for_storage"):
+        if update.message.photo or update.message.video:
+            media_type = "photo" if update.message.photo else "video"
+            file_id = update.message.photo[-1].file_id if media_type == "photo" else update.message.video.file_id
+            file_name = update.message.caption if update.message.caption else f"Media_{sender_id}"
+            
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO media_store (sender_id, sender_name, media_type, file_id, caption) VALUES (?, ?, ?, ?, ?)",
+                (sender_id, sender_name, media_type, file_id, file_name)
+            )
+            media_db_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
 
-        storage_success = (
-            f"✅ *Media Stored Successfully!*\n\n"
-            f"📌 Name: *{file_name}*\n"
-            f"🔗 **Your Shareable Link:**\n`{shareable_link}`"
-        )
-        context.user_data["waiting_for_storage"] = False
-        await update.message.reply_text(storage_success, parse_mode="Markdown")
-        return
-    
+            bot_username = context.bot.username
+            shareable_link = f"https://t.me/{bot_username}?start=media_{media_db_id}"
+
+            storage_success = (
+                f"✅ *Media Stored Successfully!*\n\n"
+                f"📌 Title: *{file_name}*\n"
+                f"🔗 **Your Shareable Link:**\n`{shareable_link}`"
+            )
+            context.user_data["waiting_for_storage"] = False
+            await update.message.reply_text(storage_success, parse_mode="Markdown")
+            return
+        else:
+            # Clear state if user sends plain text instead of media
+            context.user_data["waiting_for_storage"] = False
+
     active_users = db_execute("SELECT user_id FROM users WHERE is_active = 1 AND is_banned = 0", fetchall=True)
     
+    # Broadcast Text Messages
     if update.message.text:
         formatted_msg = f"*{sender_name}*: {update.message.text}"
         for (recipient_id,) in active_users:
@@ -474,6 +511,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     db_execute("UPDATE users SET is_active = 0 WHERE user_id = ?", (recipient_id,), commit=True)
                     
+    # Broadcast Media Messages
     elif update.message.photo or update.message.video:
         media_type = "photo" if update.message.photo else "video"
         file_id = update.message.photo[-1].file_id if media_type == "photo" else update.message.video.file_id
@@ -495,6 +533,8 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
+    
+    # Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("setmyname", set_name))
@@ -512,13 +552,14 @@ def main():
     app.add_handler(CommandHandler("unban", unban_user))
     app.add_handler(CommandHandler("kick", kick_user))
     
+    # Message Handlers
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND & filters.ChatType.PRIVATE,
             broadcast_message,
         )
     )
-    print("Bot is running with customizable service message feature...")
+    print("Bot is running with anti-spam rate limiting...")
     app.run_polling()
 
 if __name__ == "__main__":
